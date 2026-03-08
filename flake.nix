@@ -15,6 +15,7 @@
       perSystem = {pkgs, ...}: {
         devShells.default = pkgs.mkShell {
           buildInputs = [
+            pkgs.openssl
             pkgs.go
             pkgs.gopls
           ];

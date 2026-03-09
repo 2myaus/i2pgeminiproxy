@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"errors"
+	"github.com/eyedeekay/goSam"
 	"io"
 	"log"
 	"net"
@@ -33,9 +34,9 @@ func parseRequest(requestString string) (*url.URL, error) {
 	return reqUrl, nil
 }
 
-func makeOutgoing(requestUri *url.URL, tlsConfig *tls.Config) ([]byte, error) {
-	//* Make an outgoing request to a destination gemini server with the given URI,
-	//* and return the response as bytes
+func makeOutgoing(requestUri *url.URL, tlsConfig *tls.Config, sam *goSam.Client) ([]byte, error) {
+	//* Make an outgoing request to a destination gemini server on i2p with the
+	//* given URI, and return the response as bytes
 
 	// TODO (important): Verify certificates with TOFU
 	// Also TODO, verify that incoming certificate actually matches the hostname
@@ -45,18 +46,23 @@ func makeOutgoing(requestUri *url.URL, tlsConfig *tls.Config) ([]byte, error) {
 		destPort = "1965"
 	}
 
-	outgoingTlsConn, errConn := tls.Dial("tcp", requestUri.Hostname()+":"+destPort, tlsConfig)
-	if errConn != nil {
-		return nil, errConn
+	outTlsConfig := tlsConfig.Clone()
+	outTlsConfig.ServerName = requestUri.Hostname()
+
+	i2pConn, errI2pConn := sam.Dial("tcp", requestUri.Hostname()+":"+destPort)
+	if errI2pConn != nil {
+		return nil, errI2pConn
 	}
+	i2pTcpTransport := tls.Client(i2pConn, outTlsConfig)
+
 	// 10 second timeout
 	// TODO: make the timeout not hardcoded
-	outgoingTlsConn.SetDeadline(time.Now().Add(time.Second * 10))
+	i2pTcpTransport.SetDeadline(time.Now().Add(time.Second * 10))
 
-	outgoingTlsConn.Write([]byte(requestUri.String() + "\r\n"))
+	i2pTcpTransport.Write([]byte(requestUri.String() + "\r\n"))
 
 	// Read response
-	responseBytes, errRead := io.ReadAll(outgoingTlsConn)
+	responseBytes, errRead := io.ReadAll(i2pTcpTransport)
 	if errRead != nil {
 		return nil, errRead
 	}
@@ -80,16 +86,9 @@ func listenSingle(tlsConn net.Conn) (string, error) {
 	return requestString, nil
 }
 
-func redirectSingle(listener net.Listener, tlsConfig *tls.Config) error {
+func redirectSingle(tlsConn net.Conn, tlsConfig *tls.Config, sam *goSam.Client) error {
 	//* Redirect a single incoming request to the destination
 
-	log.Println("waiting for tls connection...")
-	tlsConn, errAccept := listener.Accept()
-	if errAccept != nil {
-		return errAccept
-	}
-	defer tlsConn.Close()
-	log.Println("got TLS connection")
 	// TODO: respond with status 43 instead of closing upon error
 
 	log.Println("listening for request...")
@@ -99,15 +98,20 @@ func redirectSingle(listener net.Listener, tlsConfig *tls.Config) error {
 		return errListen
 	}
 
-	log.Println("parsing request...")
+	// Parse the uri in the given request into a url object
+	log.Println("parsing uri in given request...")
 	parsed, errParse := parseRequest(requestString)
 	if errParse != nil {
 		log.Println("Error parsing request from the client")
 		return errParse
 	}
+	if !strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".i2p") {
+		log.Println("Requested uri is not an i2p address")
+		return errors.New("Requested uri is not an i2p address")
+	}
 
 	log.Println("making outgoing connection to remote server")
-	responseBytes, errResponse := makeOutgoing(parsed, tlsConfig)
+	responseBytes, errResponse := makeOutgoing(parsed, tlsConfig, sam)
 	if errResponse != nil {
 		log.Println("Error making outgoing connection to destination server")
 		return errResponse
@@ -127,6 +131,10 @@ func main() {
 		Certificates:       []tls.Certificate{cert},
 		InsecureSkipVerify: true,
 	}
+	sam, errSam := goSam.NewDefaultClient()
+	if errSam != nil {
+		log.Fatal(errSam)
+	}
 
 	listener, errListen := tls.Listen("tcp", "127.0.0.1:1965", tlsConfig)
 	if errListen != nil {
@@ -135,8 +143,23 @@ func main() {
 	defer listener.Close()
 	log.Println("opened tls listener...")
 
-	errRedirect := redirectSingle(listener, tlsConfig)
-	if errRedirect != nil {
-		log.Fatal(errRedirect)
+	for {
+		// TODO: maybe handle errors in a better way?
+		log.Println("waiting for tls connection...")
+		tlsConn, errAccept := listener.Accept()
+		if errAccept != nil {
+			log.Println("Error trying to accept connection:")
+			log.Println(errAccept)
+		}
+		log.Println("got TLS connection")
+
+		go func() {
+			defer tlsConn.Close()
+			errRedirect := redirectSingle(tlsConn, tlsConfig, sam)
+			if errRedirect != nil {
+				log.Println("Error trying to redirect connection:")
+				log.Println(errRedirect)
+			}
+		}()
 	}
 }

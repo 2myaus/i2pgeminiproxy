@@ -5,18 +5,26 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
-	"github.com/eyedeekay/goSam"
 	"io"
 	"log"
 	"net"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/eyedeekay/goSam"
 )
 
-func parseRequest(requestString string) (*url.URL, error) {
-	//* Parse a gemini request as bytes into a destination URI
+const MAX_URI_LEN = 1024       // bytes
+const REQUEST_TIMEOURT = 10000 // milliseconds
+const RESPONSE_TIMEOUT = 10000 // milliseconds
 
+func parseRequest(requestString string) (*url.URL, error) {
+	//* Parse a gemini request as a string into a destination URI
+
+	if len(requestString) > MAX_URI_LEN+len("\r\n") { // URI len + CRLF
+		return nil, errors.New("request is too long")
+	}
 	if !strings.HasSuffix(requestString, "\r\n") {
 		return nil, errors.New("request doesn't end in CR/LF")
 	}
@@ -31,7 +39,6 @@ func parseRequest(requestString string) (*url.URL, error) {
 		return nil, errors.New("incoming request has non-gemini scheme")
 	}
 
-	// TODO: more validation (length?)
 	return reqUrl, nil
 }
 
@@ -56,9 +63,8 @@ func makeOutgoing(requestUri *url.URL, tlsConfig *tls.Config, sam *goSam.Client)
 	}
 	i2pTcpTransport := tls.Client(i2pConn, outTlsConfig)
 
-	// 10 second timeout
-	// TODO: make the timeout not hardcoded
-	i2pTcpTransport.SetDeadline(time.Now().Add(time.Second * 10))
+	// Add timeout
+	i2pTcpTransport.SetDeadline(time.Now().Add(time.Millisecond * RESPONSE_TIMEOUT))
 
 	i2pTcpTransport.Write([]byte(requestUri.String() + "\r\n"))
 
@@ -74,9 +80,8 @@ func makeOutgoing(requestUri *url.URL, tlsConfig *tls.Config, sam *goSam.Client)
 func listenSingle(tlsConn net.Conn) (string, error) {
 	//* Listen for a single incoming request and return it as a string
 
-	// 10 second timeout
-	// TODO: make the timeout not hardcoded
-	tlsConn.SetDeadline(time.Now().Add(time.Second * 10))
+	// timeout
+	tlsConn.SetDeadline(time.Now().Add(time.Millisecond * REQUEST_TIMEOURT))
 
 	// Read request
 	reader := bufio.NewReader(tlsConn)
@@ -90,8 +95,6 @@ func listenSingle(tlsConn net.Conn) (string, error) {
 func redirectSingle(tlsConn net.Conn, tlsConfig *tls.Config, sam *goSam.Client) error {
 	//* Redirect a single incoming request to the destination
 
-	// TODO: respond with status 43 instead of closing upon error
-
 	log.Println("listening for request...")
 	requestString, errListen := listenSingle(tlsConn)
 	if errListen != nil {
@@ -99,25 +102,31 @@ func redirectSingle(tlsConn net.Conn, tlsConfig *tls.Config, sam *goSam.Client) 
 		return errListen
 	}
 
+	// Set timeout
+	tlsConn.SetDeadline(time.Now().Add(time.Millisecond * REQUEST_TIMEOURT))
+
 	// Parse the uri in the given request into a url object
 	log.Println("parsing uri in given request...")
 	parsed, errParse := parseRequest(requestString)
 	if errParse != nil {
-		log.Println("Error parsing request from the client")
-		return errParse
+		tlsConn.Write([]byte("43\r\n"))
+		log.Println("Error parsing request from the client (43)")
+		log.Println(errParse)
+		return nil
 	}
 	if !strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".i2p") {
+		log.Println("Cannot accept request from the client (43)")
 		log.Println("Requested uri is not an i2p address")
-		return errors.New("Requested uri is not an i2p address")
+		return nil
 	}
 
 	log.Println("making outgoing connection to remote server")
 	responseBytes, errResponse := makeOutgoing(parsed, tlsConfig, sam)
 	if errResponse != nil {
-		log.Println("Error making outgoing connection to destination server")
-		return errResponse
+		log.Println("Error making outgoing connection to destination server (43)")
+		log.Println(errResponse)
+		return nil
 	}
-	tlsConn.SetDeadline(time.Now().Add(time.Second * 10))
 	tlsConn.Write(responseBytes)
 
 	return nil

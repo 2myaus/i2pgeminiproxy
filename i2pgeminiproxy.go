@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"errors"
+	"flag"
 	"github.com/eyedeekay/goSam"
 	"io"
 	"log"
@@ -123,6 +124,15 @@ func redirectSingle(tlsConn net.Conn, tlsConfig *tls.Config, sam *goSam.Client) 
 }
 
 func main() {
+	listenFlag := flag.String(
+		"l",
+		"127.0.0.1:1965",
+		"ip/port on which to listen for incoming gemini connections",
+	)
+	listenHost, listenPort, errParse := net.SplitHostPort(*listenFlag)
+	if errParse != nil {
+		log.Fatal(errParse)
+	}
 	cert, errCert := tls.LoadX509KeyPair("testdata/cert.pem", "testdata/key.pem")
 	if errCert != nil {
 		log.Fatal(errCert)
@@ -136,7 +146,7 @@ func main() {
 		log.Fatal(errSam)
 	}
 
-	listener, errListen := tls.Listen("tcp", "127.0.0.1:1965", tlsConfig)
+	listener, errListen := tls.Listen("tcp", listenHost+":"+listenPort, tlsConfig)
 	if errListen != nil {
 		log.Fatal(errListen)
 	}

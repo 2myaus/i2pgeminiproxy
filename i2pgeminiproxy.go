@@ -16,7 +16,7 @@ import (
 )
 
 const MAX_URI_LEN = 1024       // bytes
-const REQUEST_TIMEOURT = 10000 // milliseconds
+const REQUEST_TIMEOUT = 10000  // milliseconds
 const RESPONSE_TIMEOUT = 10000 // milliseconds
 
 func parseRequest(requestString string) (*url.URL, error) {
@@ -61,7 +61,9 @@ func makeOutgoing(requestUri *url.URL, tlsConfig *tls.Config, sam *goSam.Client)
 	if errI2pConn != nil {
 		return nil, errI2pConn
 	}
+	defer i2pConn.Close()
 	i2pTcpTransport := tls.Client(i2pConn, outTlsConfig)
+	defer i2pTcpTransport.Close()
 
 	// Add timeout
 	i2pTcpTransport.SetDeadline(time.Now().Add(time.Millisecond * RESPONSE_TIMEOUT))
@@ -81,7 +83,7 @@ func listenSingle(tlsConn net.Conn) (string, error) {
 	//* Listen for a single incoming request and return it as a string
 
 	// timeout
-	tlsConn.SetDeadline(time.Now().Add(time.Millisecond * REQUEST_TIMEOURT))
+	tlsConn.SetDeadline(time.Now().Add(time.Millisecond * REQUEST_TIMEOUT))
 
 	// Read request
 	reader := bufio.NewReader(tlsConn)
@@ -90,6 +92,34 @@ func listenSingle(tlsConn net.Conn) (string, error) {
 		return "", errRead
 	}
 	return requestString, nil
+}
+
+func getResponse(requestString string, tlsConfig *tls.Config, sam *goSam.Client) []byte {
+	response43 := []byte("43\r\n")
+
+	// Parse the uri in the given request into a url object
+	log.Println("parsing uri in given request...")
+	parsed, errParse := parseRequest(requestString)
+	if errParse != nil {
+		log.Println("Error parsing request from the client (43)")
+		log.Println(errParse)
+		return response43
+	}
+	if !strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".i2p") {
+		log.Println("Cannot accept request from the client (43)")
+		log.Println("Requested uri is not an i2p address")
+		return response43
+	}
+
+	log.Println("making outgoing connection to remote server")
+	responseBytes, errResponse := makeOutgoing(parsed, tlsConfig, sam)
+	if errResponse != nil {
+		log.Println("Error making outgoing connection to destination server (43)")
+		log.Println(errResponse)
+		return response43
+	}
+
+	return responseBytes
 }
 
 func redirectSingle(tlsConn net.Conn, tlsConfig *tls.Config, sam *goSam.Client) error {
@@ -103,32 +133,12 @@ func redirectSingle(tlsConn net.Conn, tlsConfig *tls.Config, sam *goSam.Client) 
 	}
 
 	// Set timeout
-	tlsConn.SetDeadline(time.Now().Add(time.Millisecond * REQUEST_TIMEOURT))
+	tlsConn.SetDeadline(time.Now().Add(time.Millisecond * REQUEST_TIMEOUT))
 
-	// Parse the uri in the given request into a url object
-	log.Println("parsing uri in given request...")
-	parsed, errParse := parseRequest(requestString)
-	if errParse != nil {
-		tlsConn.Write([]byte("43\r\n"))
-		log.Println("Error parsing request from the client (43)")
-		log.Println(errParse)
-		return nil
+	_, errWrite := tlsConn.Write(getResponse(requestString, tlsConfig, sam))
+	if errWrite != nil {
+		log.Println("Error sending response to client")
 	}
-	if !strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".i2p") {
-		log.Println("Cannot accept request from the client (43)")
-		log.Println("Requested uri is not an i2p address")
-		return nil
-	}
-
-	log.Println("making outgoing connection to remote server")
-	responseBytes, errResponse := makeOutgoing(parsed, tlsConfig, sam)
-	if errResponse != nil {
-		log.Println("Error making outgoing connection to destination server (43)")
-		log.Println(errResponse)
-		return nil
-	}
-	tlsConn.Write(responseBytes)
-
 	return nil
 }
 
@@ -138,6 +148,8 @@ func main() {
 		"127.0.0.1:1965",
 		"ip/port on which to listen for incoming gemini connections",
 	)
+	flag.Parse()
+
 	listenHost, listenPort, errParse := net.SplitHostPort(*listenFlag)
 	if errParse != nil {
 		log.Fatal(errParse)
@@ -169,6 +181,7 @@ func main() {
 		if errAccept != nil {
 			log.Println("Error trying to accept connection:")
 			log.Println(errAccept)
+			continue
 		}
 		log.Println("got TLS connection")
 
